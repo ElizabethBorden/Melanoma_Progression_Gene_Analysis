@@ -12,3 +12,8 @@
 
 * Sex-specific reference genomes created with the GENCODE GRCH38 genome by hard masking the y-chromosome for the female-specific reference genome and hard masking the pseudoautosomal regions of the y-chromosome for the male-specific genome
 
+## Data analysis:
+  1. Differential expression analysis, visualization, and regularized regression models:
+      - program:
+  3. Association of genes with progression of melanoma
+      - program: 
