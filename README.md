@@ -14,6 +14,8 @@
 
 ## Data analysis:
   1. Differential expression analysis, visualization, and regularized regression models:
-      - program:
+      - program: Differential_Expression_Krueger_Bastian_Scatolini.Rmd
   3. Association of genes with progression of melanoma
-      - program: 
+      - program: Scatolini_progression_of_genes.Rmd
+
+* Gene lists were harmonized using David Web Services to convert all probe names from the Krueger and Scatolini datasets into official gene symbols
