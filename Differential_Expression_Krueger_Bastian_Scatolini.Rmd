@@ -1,0 +1,935 @@
+---
+title: "2021_10_5_DE_Krueger_Bastian_Scatolini_Gene_level_with_Harmonization"
+author: "Elizabeth Borden"
+date: "10/5/2021"
+output: pdf_document
+---
+
+**Purpose:** To analyze the Scatolini, Bastian, and Kreuger datasets with harmonized gene lists from David
+
+**Methods:**
+
+* Differential expression analysis
+
+* Linear model analysis
+
+* Overlapping genes
+
+
+```{r setup, include=FALSE}
+#### Packages loaded ####
+library(BiocManager)
+library(limma)
+library(ggfortify)
+library(pheatmap)
+library(RColorBrewer)
+library(sva)
+library(pamr)
+library(glmnet)
+library(devtools)
+library(factoextra)
+library(edgeR)
+library(coefplot)
+library(pROC)
+library(compositions)
+library(org.Hs.eg.db)
+library(clusterProfiler)
+library(enrichplot)
+library(plyr)
+library(biomaRt)
+```
+
+# Bastian Analysis
+
+## Part 1: Differential Expression Analysis
+
+### Read in and format data
+```{r Setup, message=FALSE}
+#### Read in and format data ####
+setwd("~/3.0 Hasting Research/Melanoma Biomarker/Bastian")
+transcripts <- as.data.frame(read.table("transcript_names.out"), header=FALSE)
+samples <- matrix(c("SRR6795546", "SRR6795548", "SRR6795522", "SRR6795550",
+                    "SRR6795576", "SRR6795365", "SRR6795366", "SRR6795392",
+                    "SRR6795424", "SRR6795425", "SRR6795459", "SRR6795475",
+                    "SRR6795493", "SRR6795503", "SRR6795524", "SRR6795532",
+                    "SRR6795560", "SRR6795584", "SRR6795589", "SRR6795594",
+                    "SRR6795599", "SRR6795607", "SRR6795620", "SRR6795625",
+                    "SRR6795630", "SRR6795367", "SRR6795393", "SRR6795460",
+                    "SRR6795476", "SRR6795494", "SRR6795504", "SRR6795533",
+                    "SRR6795561", "SRR6795577", "SRR6795585", "SRR6795590",
+                    "SRR6795595", "SRR6795600", "SRR6795608", "SRR6795621",
+                    "SRR6795626", "SRR6795631"
+))
+
+## Combines raw read counts from each of the files into a data frame where each row is a gene and each column is a sample
+total_data <- matrix(c(0),nrow=206030, ncol=42)
+total_data <- as.data.frame(total_data)
+x=1
+for (i in samples){
+  data <- as.data.frame(read.table(paste(i,"_quant.sf", sep=""), header=FALSE))
+  tpm <- data[,12] ## Changed to use raw expression, not TPM even though variable is here labeled TPM
+  tpm <- as.data.frame(tpm)
+  colnames(tpm) <- i
+  total_data[,x] <- tpm
+  x=x+1
+}
+colnames(total_data) <- samples
+```
+
+### Change to gene names
+```{r}
+#### Change to gene names ####
+colnames(transcripts) <- transcripts[1,]
+transcripts <- transcripts[-1,]
+transcripts <- as.data.frame(transcripts)
+row.names(total_data) <- transcripts[,1]
+transcripts[,1]=gsub(".18","",transcripts[,1], fixed=TRUE)
+transcripts[,1]=gsub(".17","",transcripts[,1], fixed=TRUE)
+transcripts[,1]=gsub(".16","",transcripts[,1], fixed=TRUE)
+transcripts[,1]=gsub(".15","",transcripts[,1], fixed=TRUE)
+transcripts[,1]=gsub(".14","",transcripts[,1], fixed=TRUE)
+transcripts[,1]=gsub(".13","",transcripts[,1], fixed=TRUE)
+transcripts[,1]=gsub(".12","",transcripts[,1], fixed=TRUE)
+transcripts[,1]=gsub(".11","",transcripts[,1], fixed=TRUE)
+transcripts[,1]=gsub(".10","",transcripts[,1], fixed=TRUE)
+transcripts[,1]=gsub(".9","",transcripts[,1], fixed=TRUE)
+transcripts[,1]=gsub(".8","",transcripts[,1], fixed=TRUE)
+transcripts[,1]=gsub(".7","",transcripts[,1], fixed=TRUE)
+transcripts[,1]=gsub(".6","",transcripts[,1], fixed=TRUE)
+transcripts[,1]=gsub(".5","",transcripts[,1], fixed=TRUE)
+transcripts[,1]=gsub(".4","",transcripts[,1], fixed=TRUE)
+transcripts[,1]=gsub(".3","",transcripts[,1], fixed=TRUE)
+transcripts[,1]=gsub(".2","",transcripts[,1], fixed=TRUE)
+transcripts[,1]=gsub(".1","",transcripts[,1], fixed=TRUE)
+setwd("~/3.0 Hasting Research/Novel Model/Cohen Melanoma/Penalized_Regression_Data")
+Gencode <- as.data.frame(read.table("ensemblTranscripts_GTF_new.txt"))
+Gencode <- Gencode[Gencode$V7 %in% transcripts$transcripts,]
+genes <- Gencode[match(transcripts$transcripts, Gencode$V7),]
+genes <- cbind(genes[,7:8], transcripts)
+# Combine and remove unnanotated genes
+for (i in 1:length(genes[,1])){
+  if (is.na(genes[i,1])){
+    genes[i,2] = "unknown"
+  }
+}
+total_data <- cbind(genes$V8, total_data)
+
+total_data <- ddply(total_data, "genes$V8", numcolwise(sum))
+total_data <- total_data[-54034,]
+row.names(total_data) <- total_data[,1]
+total_data <- total_data[,-1]
+
+dge <- DGEList(counts=total_data, genes=row.names(total_data))
+```
+
+### Voom Transformation
+```{r}
+# Set up desgin matrix
+design <- cbind(INT=c(1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                      0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0), 
+                MEL=c(0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+                      0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0),
+                NEV=c(0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                      1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1))
+
+# Filter with a minimum read count of 5
+keep <- filterByExpr(dge, design, min.count=5)
+dge <- dge[keep,,keep.lib.size=FALSE]
+# Recalcualte library normalization
+dge <- calcNormFactors(dge, method="TMM")
+
+# Voom transformation
+dge <- voomWithQualityWeights(dge, design, plot=TRUE)
+```
+
+### MDS analysis
+```{r}
+# Eliminate intermediate samples for visualization
+design_mds <- cbind(INT=c(0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                      0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0), 
+                MEL=c(1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+                      0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0),
+                NEV=c(0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                      1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1))
+total_data <- dge$E
+total_data_mds <- total_data[,6:42]
+# Plot MDS 
+mds <- plotMDS(total_data_mds, top = 50, dim.plot = c(1,2),
+               pch=2,
+               col=ifelse(design_mds[,1]==1, "blue",
+                          ifelse(design_mds[,2]==1, "red", "green")))
+
+pdf("~/3.0 Hasting Research/Melanoma Biomarker/DEG_figures/MDS_Bastian.pdf", width=6, height=6)
+mds <- plotMDS(total_data_mds, top = 50, dim.plot = c(1,2),
+               pch=2,
+               col=ifelse(design_mds[,1]==1, "blue",
+                          ifelse(design_mds[,2]==1, "red", "green")))
+dev.off()
+#Note: Red is Melanoma, green is nevus
+```
+
+### Differential Expression
+```{r}
+metadata <- as.data.frame(read.table("~/3.0 Hasting Research/Melanoma Biomarker/Bastian/Bastian_metadata_abbreviated.txt", header=TRUE))
+# Calculate correlation between samples from the same person
+corfit <- duplicateCorrelation(dge, design, block = metadata$patient)
+# This should give a positive correlation value. 
+corfit$consensus
+
+#### Limma Fits ####
+fit <- lmFit(dge, design, block=metadata$patient, correlation = corfit$consensus.correlation)
+contrast.matrix <- makeContrasts(MEL-NEV,
+    levels=design)
+head(contrast.matrix)
+fit2 <- contrasts.fit(fit, contrast.matrix)
+fit2 <- eBayes(fit2)
+plotSA(fit2, main = "Final model: Mean-variance trend")
+volcanoplot(fit2)
+results <- decideTests(fit2, p.value=0.05, lfc=1.5)
+vennDiagram(results)
+pdf("~/3.0 Hasting Research/Melanoma Biomarker/DEG_figures/Venn_Bastian.pdf", width=6, height=6)
+vennDiagram(results)
+dev.off()
+
+# Getting the DEGs. Log2FC of 1 is equivalent to linear fold change of 2.
+degResult <- topTable(fit2, coef=1, n=Inf)
+Top_MelvNev <- topTable(fit2, coef=1, n=Inf, p.value=0.05, lfc=1.5)
+Top_MelvNev_PCA <- topTable(fit2, adjust="BH", p.value=0.05, lfc=1.5)
+#Top_MelvInt <- topTable(fit2, coef=2, n=Inf, p.value=0.05, lfc=2)
+#Top_IntvNev <- topTable(fit2, coef=3, n=Inf, p.value=0.05, lfc=2)
+summary(decideTests(fit2, adjust.method = "BH", p.value = 0.05, lfc = 1.5))
+
+write.csv(Top_MelvNev,"~/3.0 Hasting Research/Melanoma Biomarker/Supplementary_table1_Bastian_DEGs.csv")
+```
+
+### PCA
+```{r}
+total_data <- total_data[,6:42]
+total_data_limited <- total_data[which(row.names(total_data) %in% Top_MelvNev_PCA$genes),]
+total_data_limited <- t(total_data_limited)
+pca <- princomp(total_data_limited)
+id <- matrix(c("MEL","MEL","MEL","MEL","MEL","MEL",
+               "MEL","MEL","MEL","MEL","MEL","MEL","MEL","MEL","MEL","MEL","MEL",
+               "MEL","MEL","MEL","NEV","NEV","NEV","NEV","NEV","NEV","NEV","NEV",
+               "NEV","NEV","NEV","NEV","NEV","NEV","NEV","NEV","NEV"))
+colnames(id) <- c("Sample")
+total_data_limited <- cbind(total_data_limited, id)
+total_data_limited <- as.data.frame(total_data_limited)
+autoplot(pca, data=total_data_limited, colour="Sample", frame=FALSE)
+pdf("~/3.0 Hasting Research/Melanoma Biomarker/Bastian/Bastian Figures/PCA_Bastian.pdf", width=3, height=3)
+autoplot(pca, data=total_data_limited, colour="Sample", frame=TRUE)
+dev.off()
+```
+
+### Heatmap
+```{r}
+annotation <- as.data.frame(c("MEL","MEL","MEL","MEL","MEL","MEL",
+               "MEL","MEL","MEL","MEL","MEL","MEL","MEL","MEL","MEL","MEL","MEL",
+               "MEL","MEL","MEL","NEV","NEV","NEV","NEV","NEV","NEV","NEV","NEV",
+               "NEV","NEV","NEV","NEV","NEV","NEV","NEV","NEV","NEV"))
+total_data_limited <- total_data_limited[,-11]
+row.names(annotation) <- row.names(total_data_limited)
+total_data_limited <- t(total_data_limited)
+samples <- c("indianred2", "plum")
+names(samples) <- c("MEL", "NEV")
+anno_colors <- list(samples=samples)
+colnames(annotation) <- c("samples")
+class(total_data_limited) <- "numeric"
+pheatmap(total_data_limited, annotation=annotation, annotation_colors = anno_colors,
+         show_colnames = FALSE)
+pdf("~/3.0 Hasting Research/Melanoma Biomarker/Bastian/Bastian Figures/Heatmap_Bastian.pdf", width=5, height=3)
+pheatmap(total_data_limited, annotation=annotation, annotation_colors = anno_colors,
+         show_colnames = FALSE,color =colorRampPalette(rev(brewer.pal(n = 7, name ="RdBu")))(100))
+dev.off()
+```
+
+
+## Part 3: Biinomial Linear Predictor
+
+### Setup Outcome Matrix
+```{r}
+outcome <- matrix(c("Mel","Mel",
+                    "Mel","Mel","Mel","Mel","Mel","Mel","Mel",
+                    "Mel","Mel","Mel","Mel","Mel","Mel","Mel",
+                    "Mel","Mel","Mel","Mel","Ben","Ben","Ben",
+                    "Ben","Ben","Ben","Ben","Ben","Ben","Ben",
+                    "Ben","Ben","Ben","Ben","Ben","Ben","Ben"
+))
+```
+
+### Binomial Regression Fit
+```{r, warning=FALSE}
+set.seed(1)
+#total_data <- total_data$E
+#total_data <- total_data[,6:42]
+total_data <- t(total_data)
+
+glm_fit <- glmnet(x=total_data, y=outcome, family="binomial")
+cv.fit <- cv.glmnet(x=total_data, y=outcome, family="binomial")
+plot(cv.fit)
+```
+
+### Isolate Coefficients
+```{r}
+tmp_coeffs <- coef(cv.fit, s = "lambda.min")
+data_1_names <- tmp_coeffs@i
+data_1_numbers <- tmp_coeffs@x
+for (i in 2:length(data_1_numbers)){
+  y=as.numeric(data_1_names[i])
+  data_1_names[i] = colnames(total_data)[y]
+}
+selected_genes <- cbind(data_1_numbers)
+rownames(selected_genes) <- data_1_names
+colnames(selected_genes) <- c("Coefficient")
+print(selected_genes)
+write.csv(selected_genes,"~/3.0 Hasting Research/Melanoma Biomarker/Supplementary_table4_Bastian_binomial.csv")
+```
+
+### Biplot
+```{r}
+total_data <- t(total_data)
+biplot_data <- total_data[which(rownames(total_data) %in% rownames(selected_genes)),]
+class(biplot_data)= "numeric"
+biplot_data <- t(biplot_data)
+pca <- princomp(biplot_data)
+id <- matrix(c("Melanoma", "Melanoma", "Melanoma",
+"Melanoma", "Melanoma", "Melanoma", "Melanoma",
+"Melanoma", "Melanoma", "Melanoma", "Melanoma",
+"Melanoma", "Melanoma", "Melanoma", "Melanoma",
+"Melanoma", "Melanoma", "Melanoma", "Melanoma",
+"Melanoma", "Nevus", "Nevus", "Nevus",
+"Nevus", "Nevus", "Nevus", "Nevus",
+"Nevus", "Nevus", "Nevus", "Nevus",
+"Nevus", "Nevus", "Nevus", "Nevus",
+"Nevus", "Nevus"))
+colnames(id) <- c("Sample")
+id <- as.data.frame(id)
+biplot_data <- cbind(biplot_data,id)
+
+fviz_pca_biplot(pca, 
+                geom.ind = "point",
+                palette = c("darkolivegreen","skyblue","indianred2"),
+                col.ind=biplot_data[,21],
+                pch=19,
+                repel=TRUE,
+                ggrepel.max.overlaps=Inf,
+                title="Lasso Regression Genes, Bastian")+scale_shape_manual(values=c(19,19,19))
+
+pdf("~/3.0 Hasting Research/Melanoma Biomarker/Bastian/Bastian Figures/Genes_Bastian_binomial.pdf")
+fviz_pca_biplot(pca, 
+                geom.ind = "point",
+                palette = c("darkolivegreen","skyblue","indianred2"),
+                col.ind=biplot_data[,21],
+                pch=19,
+                repel=TRUE,
+                title="Lasso Regression Genes, Bastian")+scale_shape_manual(values=c(19,19,19))
+dev.off()
+
+```
+
+# Kreuger Analysis
+
+## Part 1: Differential Expression Analysis
+
+### Read in and format data
+```{r}
+#### Get Data #### 
+setwd("~/3.0 Hasting Research/Melanoma Biomarker/Krueger")
+data <- as.data.frame(read.table("Garcet_Krueger_Data_forprocessing.txt", row.names=1, header=TRUE))
+genes_krueger <- as.data.frame(read.table("Gene_name_conversion_abbrev.txt", row.names = 1, header=TRUE))
+
+# Isolate genes with DAVID annotations
+data <- data[which(row.names(data) %in% row.names(genes_krueger)),]
+data <- data[match(row.names(genes_krueger),row.names(data)),]
+data <- cbind(genes_krueger$To, data)
+# Take average of different probes for the same gene
+data <- ddply(data, "genes_krueger$To", numcolwise(mean))
+row.names(data) <- data[,1]
+data <- data[,-1]
+
+# Restrict to data with a minimum expression of at least 5
+data <- data[rowSums(data[1:21176,]>5)>0,]
+
+design_krueger <- cbind(CMN=c(1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0), 
+                 DN=c(0,0,0,0,0,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0),
+                 NS=c(0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0),
+                 MM=c(0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1))
+```
+
+
+### MDS analysis
+```{r}
+# Remove normal skin for visualization
+design_mds <- cbind(CMN=c(1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0), 
+                 DN=c(0,0,0,0,0,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0),
+                 NS=c(0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0),
+                 MM=c(0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1))
+data_1 <- data[,1:12]
+data_2 <- data[,19:34]
+mds_data <- cbind(data_1, data_2)
+mds <- plotMDS(mds_data, top = 50, dim.plot = c(1,2),
+               pch=2,
+               col=ifelse(design_mds[,1]==1, "blue",
+                          ifelse(design_mds[,4]==1, "red",
+                                 ifelse(design_mds[,2]==1, "black", "green"))))
+#Note: Red is Melanoma, Blue is CMN, and Black is DN
+
+pdf("~/3.0 Hasting Research/Melanoma Biomarker/DEG_figures/MDS_Krueger.pdf", width=6, height=6)
+mds <- plotMDS(mds_data, top = 50, dim.plot = c(2,1),
+               pch=2,
+               col=ifelse(design_mds[,1]==1, "blue",
+                          ifelse(design_mds[,4]==1, "red",
+                                 ifelse(design_mds[,2]==1, "black", "green"))))
+dev.off
+
+
+```
+
+### Differential Expression
+```{r}
+#### Creating EList Object ####
+E <- new("EList")
+E$E <- data
+E$genes <- row.names(data)
+#### Limma Fits ####
+fit <- lmFit(E, design_krueger)
+contrast.matrix <- makeContrasts(MM-DN,
+                                 MM-CMN,
+                                 DN-CMN,
+    levels=design_krueger)
+fit2 <- contrasts.fit(fit, contrast.matrix)
+fit2 <- eBayes(fit2)
+plotSA(fit2, main = "Final model: Mean-variance trend")
+volcanoplot(fit2)
+
+results <- decideTests(fit2, p.value=0.05, lfc=1.5)
+vennDiagram(results)
+pdf("~/3.0 Hasting Research/Melanoma Biomarker/DEG_figures/Venn_Krueger.pdf", width=6, height=6)
+vennDiagram(results)
+dev.off()
+
+# Getting the DEGs. Log2FC of 1 is equivalent to linear fold change of 2.
+degResult <- topTable(fit2, coef=1, n=Inf)
+Top_MMvDN <- topTable(fit2, coef=1, n=Inf, p.value=0.05, lfc=1.5)
+Top_MMvCMN <- topTable(fit2, coef=2, n=Inf, p.value=0.05, lfc=1.5)
+Top_DNvCMN <- topTable(fit2, coef=3, n=Inf, p.value=0.05, lfc=1.5)
+summary(decideTests(fit2, adjust.method = "BH", p.value = 0.05, lfc = 1.5))
+Top_MMvDN_PCA <- topTable(fit2, adjust="BH", p.value=0.05, lfc=1.5)
+write.csv(Top_MMvDN,"~/3.0 Hasting Research/Melanoma Biomarker/Supplementary_table2_Krueger_DEGs.csv")
+```
+
+### PCA
+```{r}
+data_1 <- data[,1:12]
+data_2 <- data[,19:34]
+data <- cbind(data_1, data_2)
+total_data_limited <- data[which(row.names(data) %in% Top_MMvDN_PCA$ProbeID),]
+total_data_limited <- t(total_data_limited)
+pca <- princomp(total_data_limited)
+id <- matrix(c("CMN","CMN","CMN","CMN","CMN","DN","DN","DN","DN","DN","DN",
+               "DN","MM","MM","MM","MM","MM","MM","MM","MM","MM","MM","MM",
+               "MM","MM","MM","MM","MM"))
+colnames(id) <- c("Sample")
+total_data_limited <- cbind(total_data_limited, id)
+total_data_limited <- as.data.frame(total_data_limited)
+autoplot(pca, data=total_data_limited, colour="Sample", frame=FALSE)
+pdf("~/3.0 Hasting Research/Melanoma Biomarker/Krueger/Kreuger Figures/PCA_Krueger.pdf", width=3, height=3)
+autoplot(pca, data=total_data_limited, colour="Sample", frame=TRUE)
+dev.off()
+```
+
+### Heatmap
+```{r}
+annotation <- as.data.frame(c("CMN","CMN","CMN","CMN","CMN","DN","DN","DN","DN","DN","DN",
+               "DN","MM","MM","MM","MM","MM","MM","MM","MM","MM","MM","MM",
+               "MM","MM","MM","MM","MM"))
+total_data_limited <- total_data_limited[,-11]
+row.names(annotation) <- row.names(total_data_limited)
+total_data_limited <- t(total_data_limited)
+samples <- c("indianred2", "darkolivegreen3", "plum")
+names(samples) <- c("CMN", "MM", "DN")
+anno_colors <- list(samples=samples)
+colnames(annotation) <- c("samples")
+class(total_data_limited) <- "numeric"
+pheatmap(total_data_limited, annotation=annotation, annotation_colors = anno_colors,
+         show_colnames = FALSE)
+pdf("~/3.0 Hasting Research/Melanoma Biomarker/Krueger/Kreuger Figures/Heatmap_Krueger.pdf", width=5, height=3)
+pheatmap(total_data_limited, annotation=annotation, annotation_colors = anno_colors,
+         show_colnames = FALSE,color =colorRampPalette(rev(brewer.pal(n = 7, name ="RdBu")))(100))
+dev.off()
+```
+
+## Part 2: Multinomial Linear Predictor
+
+### Multinomial Regression Fit
+```{r}
+set.seed(1)
+#### Penalized Regression Model ####
+data <- t(data)
+outcome <- matrix(c("CMN","CMN","CMN","CMN","CMN","DN","DN","DN","DN","DN","DN","DN","MM","MM","MM","MM","MM","MM",
+                    "MM","MM","MM","MM","MM","MM","MM","MM","MM","MM"))
+glm_fit <- glmnet(x=data, y=outcome, family="multinomial", type.multinomial = "grouped")
+cv.fit <- cv.glmnet(x=data, y=outcome, family="multinomial", type.multinomial = "grouped")
+plot(cv.fit)
+```
+
+### Isolate coefficients
+```{r}
+tmp_coeffs <- coef(cv.fit, s = "lambda.min")
+data_1_names <- tmp_coeffs[["CMN"]]@i
+data_1_numbers <- tmp_coeffs[["CMN"]]@x
+data <- t(data)
+for (i in 2:length(data_1_numbers)){
+  y=as.numeric(data_1_names[i])
+  data_1_names[i] = rownames(data)[y]
+}
+data_2_numbers <- tmp_coeffs[["DN"]]@x
+data_3_numbers <- tmp_coeffs[["MM"]]@x
+selected_genes <- cbind(data_1_numbers, data_2_numbers, data_3_numbers)
+rownames(selected_genes) <- data_1_names
+colnames(selected_genes) <- c("CMN", "DN", "MM")
+print(selected_genes)
+write.csv(selected_genes,"~/3.0 Hasting Research/Melanoma Biomarker/Supplementary_table5_Krueger_multinomial.csv")
+```
+
+### Biplot
+```{r}
+biplot_data <- data[data_1_names[2:32],]
+biplot_data <- t(biplot_data)
+pca <- prcomp(biplot_data)
+
+colnames(outcome) <- c("Sample")
+biplot_data <- cbind(biplot_data, outcome)
+biplot_data <- as.data.frame(biplot_data)
+
+fviz_pca_biplot(pca, 
+                geom.ind = "point",
+                palette = c("indianred2","darkolivegreen","skyblue"),
+                col.ind=biplot_data[,32],
+                pch=19,
+                repel=TRUE,
+                title="Lasso Regression Genes, Krueger")+scale_shape_manual(values=c(19,19,19))
+
+pdf("~/3.0 Hasting Research/Melanoma Biomarker/Krueger/Kreuger Figures/Genes_Krueger_multinomial.pdf")
+fviz_pca_biplot(pca, 
+                geom.ind = "point",
+                palette = c("indianred2","darkolivegreen","skyblue"),
+                col.ind=biplot_data[,32],
+                pch=19,
+                repel=TRUE,
+                title="Lasso Regression Genes, Krueger")+scale_shape_manual(values=c(19,19,19))
+dev.off()
+```
+
+## Binomial Linear Predictor
+
+### Binomial Regression Fit
+```{r}
+set.seed(1)
+#### Penalized Regression Model ####
+data <- data[,6:28]
+data <- t(data)
+outcome <- matrix(c("DN","DN","DN","DN","DN","DN","DN","MM","MM","MM","MM","MM","MM",
+                    "MM","MM","MM","MM","MM","MM","MM","MM","MM","MM"))
+glm_fit <- glmnet(x=data, y=outcome, family="binomial")
+cv.fit <- cv.glmnet(x=data, y=outcome, family="binomial")
+plot(cv.fit)
+```
+
+### Isolate coefficients
+```{r}
+data <- t(data)
+tmp_coeffs <- coef(cv.fit, s = "lambda.min")
+data_1_names <- tmp_coeffs@i
+data_1_numbers <- tmp_coeffs@x
+for (i in 2:length(data_1_numbers)){
+  y=as.numeric(data_1_names[i])
+  data_1_names[i] = rownames(data)[y]
+}
+selected_genes <- cbind(data_1_numbers)
+rownames(selected_genes) <- data_1_names
+colnames(selected_genes) <- c("Coefficient")
+print(selected_genes)
+write.csv(selected_genes,"~/3.0 Hasting Research/Melanoma Biomarker/Supplementary_table6_Krueger_binomial.csv")
+```
+
+### Biplot
+```{r}
+biplot_data <- data[data_1_names[2:17],]
+biplot_data <- t(biplot_data)
+pca <- princomp(biplot_data)#
+
+colnames(outcome) <- c("Sample")
+biplot_data <- cbind(biplot_data,outcome)
+
+fviz_pca_biplot(pca, 
+                geom.ind = "point",
+                palette = c("indianred2","darkolivegreen","skyblue"),
+                col.ind=biplot_data[,17],
+                pch=19,
+                repel=TRUE,
+                title="Lasso Regression Genes, Krueger")+scale_shape_manual(values=c(19,19,19))
+
+pdf("~/3.0 Hasting Research/Melanoma Biomarker/Krueger/Kreuger Figures/Genes_Krueger_binomial.pdf")
+fviz_pca_biplot(pca, 
+                geom.ind = "point",
+                palette = c("indianred2","darkolivegreen","skyblue"),
+                col.ind=biplot_data[,17],
+                pch=19,
+                repel=TRUE,
+                title="Lasso Regression Genes, Krueger")+scale_shape_manual(values=c(19,19,19))
+dev.off()
+```
+
+# Scatolini Analysis
+
+## Part 1: Differential Expression Analysis
+
+### Read in and format data
+```{r, warning=FALSE, message=FALSE}
+#### Get Data #### 
+setwd("~/3.0 Hasting Research/Melanoma Biomarker/Scatolini")
+data <- as.data.frame(read.table("All_expression_data.txt", header=TRUE))
+genes <- as.data.frame(read.table("Gene_names.txt", header=TRUE))
+genes_convert <- as.data.frame(read.table("Gene_names_converted_abbr.txt", header=TRUE))
+
+# Restrict to genes identified by DAVID
+genes <- genes[genes$ID %in% data$Sample_title,]
+genes <- genes[match(data$Sample_title,genes$ID),]
+data <- cbind(genes[,2], data)
+data <- data[,-2]
+data <- data[which(data$`genes[, 2]` %in% genes_convert$From),]
+genes_convert <- genes_convert[match(data$`genes[, 2]`, genes_convert$From),]
+data <- data[,-1]
+
+# Change from log 10 values to log 2 values
+data <- 10^(data)
+data <- log(data, 2)
+
+# Take average of different probes for the same gene
+data <- cbind(genes_convert$To, data)
+data <- ddply(data, "genes_convert$To", numcolwise(mean))
+row.names(data) <- data[,1]
+data <- data[,-1]
+
+# Remove metastatic samples
+data_1 <- data[,1:41]
+data_2 <- data[,47:57]
+
+data <- cbind(data_1, data_2)
+
+# Restrict to data with at least an absolute value expression of 2
+data <- data[rowSums(abs(data[1:18982,])>1)>0,]
+```
+
+### MDS analysis
+```{r}
+design <- cbind(
+  BN=c(1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0),
+  DN=c(0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1),
+  RGM=c(0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0),
+  VGM=c(0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0))
+
+mds <- plotMDS(data, top = 50, dim.plot = c(1,2),
+               pch=2,
+               col=ifelse(design[,1]==1, "blue",
+                          ifelse(design[,3]==1, "orange",
+                                 ifelse(design[,2]==1, "black", 
+                                        ifelse(design[,4]==1, "red", "pink")))))
+#Note: Red is vertical growth melanoma, orange is radial growth melanoma, Blue is BN, Black is DN
+```
+
+### Differential Expression
+```{r}
+design <- cbind(
+  BN=c(1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0),
+  DN=c(0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1),
+  RGM=c(0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0),
+  VGM=c(0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0))
+#### Creating EList Object ####
+E <- new("EList")
+E$E <- data
+E$genes <- row.names(data)
+#### Limma Fits ####
+fit <- lmFit(E, design)
+contrast.matrix <- makeContrasts(VGM-RGM,
+                                 VGM-DN,
+                                 VGM-BN,
+                                 RGM-DN,
+                                 RGM-BN,
+                                 DN-BN,
+    levels=design)
+
+fit2 <- contrasts.fit(fit, contrast.matrix)
+fit2 <- eBayes(fit2)
+plotSA(fit2, main = "Final model: Mean-variance trend")
+volcanoplot(fit2)
+
+results <- decideTests(fit2, p.value=0.05, lfc=1.5)
+
+# Getting the DEGs. Log2FC of 1 is equivalent to linear fold change of 2.
+degResult <- topTable(fit2, coef=2, n=Inf)
+Top_VGMvDN_scat <- topTable(fit2, coef=2, n=Inf, p.value=0.05, lfc=1.5)
+Top_VGMvDN_PCA_scat <- topTable(fit2, adjust="BH", p.value=0.05, lfc=1.5)
+summary(decideTests(fit2, adjust.method = "BH", p.value = 0.05, lfc = 1.5))
+write.csv(Top_VGMvDN_scat,"~/3.0 Hasting Research/Melanoma Biomarker/Supplementary_table3_Scatolini_DEGs.csv")
+```
+
+
+### PCA
+```{r}
+total_data_limited <- data[which(row.names(data) %in% Top_VGMvDN_PCA_scat$ProbeID),]
+total_data_limited <- t(total_data_limited)
+pca <- princomp(total_data_limited)
+id <- matrix(c("CMN","CMN","CMN","CMN","CMN","CMN","CMN","CMN","CMN","CMN","CMN","CMN","CMN","CMN","CMN","CMN","CMN","CMN",
+                    "RGM","RGM","RGM","RGM","RGM","RGM","RGM","RGM","VGM","VGM","VGM","VGM","VGM","VGM","VGM","VGM","VGM","VGM","VGM","VGM","VGM","VGM","VGM",
+                    "DN","DN","DN","DN","DN","DN","DN","DN","DN","DN","DN"))
+colnames(id) <- c("Sample")
+total_data_limited <- cbind(total_data_limited, id)
+total_data_limited <- as.data.frame(total_data_limited)
+autoplot(pca, data=total_data_limited, colour="Sample", frame=FALSE)
+pdf("~/3.0 Hasting Research/Melanoma Biomarker/Scatolini/Scatolini Figures/PCA_Bastian.pdf", width=3, height=3)
+autoplot(pca, data=total_data_limited, colour="Sample", frame=TRUE)
+dev.off()
+```
+
+### Heatmap
+```{r}
+annotation <- as.data.frame(c("CMN","CMN","CMN","CMN","CMN","CMN","CMN","CMN","CMN","CMN","CMN","CMN","CMN","CMN","CMN","CMN","CMN","CMN",
+                    "RGM","RGM","RGM","RGM","RGM","RGM","RGM","RGM","VGM","VGM","VGM","VGM","VGM","VGM","VGM","VGM","VGM","VGM","VGM","VGM","VGM","VGM","VGM",
+                    "DN","DN","DN","DN","DN","DN","DN","DN","DN","DN","DN"))
+total_data_limited <- total_data_limited[,-11]
+row.names(annotation) <- row.names(total_data_limited)
+total_data_limited <- t(total_data_limited)
+samples <- c("indianred2", "darkolivegreen3", "plum", "black")
+names(samples) <- c("CMN", "VGM", "RGM", "DN")
+anno_colors <- list(samples=samples)
+colnames(annotation) <- c("samples")
+class(total_data_limited) <- "numeric"
+pheatmap(total_data_limited, annotation=annotation, annotation_colors = anno_colors,
+         show_colnames = FALSE)
+pdf("~/3.0 Hasting Research/Melanoma Biomarker/Scatolini/Scatolini Figures/Heatmap_Bastian.pdf", width=5, height=3)
+pheatmap(total_data_limited, annotation=annotation, annotation_colors = anno_colors,
+         show_colnames = FALSE,color =colorRampPalette(rev(brewer.pal(n = 7, name ="RdBu")))(100))
+dev.off()
+```
+
+## Multinomial Lineear Predictor
+
+### Multinomial Regression Fit
+```{r}
+set.seed(1)
+#### Penalized Regression Model ####
+data <- t(data)
+outcome <- matrix(c("CMN","CMN","CMN","CMN","CMN","CMN","CMN","CMN","CMN","CMN","CMN","CMN","CMN","CMN","CMN","CMN","CMN","CMN",
+                    "RGM","RGM","RGM","RGM","RGM","RGM","RGM","RGM","VGM","VGM","VGM","VGM","VGM","VGM","VGM","VGM","VGM","VGM","VGM","VGM","VGM","VGM","VGM",
+                    "DN","DN","DN","DN","DN","DN","DN","DN","DN","DN","DN"))
+glm_fit <- glmnet(x=data, y=outcome, family="multinomial", type.multinomial = "grouped")
+cv.fit <- cv.glmnet(x=data, y=outcome, family="multinomial", type.multinomial = "grouped")
+plot(cv.fit)
+```
+
+### Isolate coefficients
+```{r}
+tmp_coeffs <- coef(cv.fit, s = "lambda.min")
+data_1_names <- tmp_coeffs[["CMN"]]@i
+data_1_numbers <- tmp_coeffs[["CMN"]]@x
+data <- t(data)
+for (i in 2:length(data_1_numbers)){
+  y=as.numeric(data_1_names[i])
+  data_1_names[i] = rownames(data)[y]
+}
+data_2_numbers <- tmp_coeffs[["DN"]]@x
+data_3_numbers <- tmp_coeffs[["RGM"]]@x
+data_4_numbers <- tmp_coeffs[["VGM"]]@x
+selected_genes <- cbind(data_1_numbers, data_2_numbers, data_3_numbers, data_4_numbers)
+rownames(selected_genes) <- data_1_names
+colnames(selected_genes) <- c("CMN", "DN", "RGM", "VGM")
+print(selected_genes)
+write.csv(selected_genes,"~/3.0 Hasting Research/Melanoma Biomarker/Supplementary_table7_Scatolini_multinomial.csv")
+```
+
+### Biplot
+```{r}
+biplot_data <- data[data_1_names[2:37],]
+biplot_data <- t(biplot_data)
+pca <- princomp(biplot_data)#
+
+colnames(outcome) <- c("Sample")
+biplot_data <- cbind(biplot_data,outcome)
+biplot_data <- as.data.frame(biplot_data)
+
+fviz_pca_biplot(pca, 
+                geom.ind = "point",
+                palette = c("indianred2","darkolivegreen","skyblue", "black"),
+                col.ind=biplot_data[,37],
+                pch=19,
+                repel=TRUE,
+                title="Lasso Regression Genes, Scatolini")+scale_shape_manual(values=c(19,19,19,19))
+
+pdf("~/3.0 Hasting Research/Melanoma Biomarker/Scatolini/Scatolini Figures/Genes_Scatolini_multinomial.pdf")
+fviz_pca_biplot(pca, 
+                geom.ind = "point",
+                palette = c("indianred2","darkolivegreen","skyblue", "black"),
+                col.ind=biplot_data[,37],
+                pch=19,
+                repel=TRUE,
+                title="Lasso Regression Genes, Scatolini")+scale_shape_manual(values=c(19,19,19,19))
+dev.off()
+```
+
+## Binomial Regression
+
+### Binomial Regression Fit
+```{r}
+set.seed(1)
+#### Penalized Regression Model ####
+data <- data[,27:52]
+data <- t(data)
+outcome <- matrix(c("VGM","VGM","VGM","VGM","VGM","VGM","VGM","VGM","VGM","VGM","VGM","VGM","VGM","VGM","VGM",
+                    "DN","DN","DN","DN","DN","DN","DN","DN","DN","DN","DN"))
+glm_fit <- glmnet(x=data, y=outcome, family="binomial")
+cv.fit <- cv.glmnet(x=data, y=outcome, family="binomial")
+plot(cv.fit)
+```
+
+### Isolate Coefficients
+```{r}
+data <- t(data)
+tmp_coeffs <- coef(cv.fit, s = "lambda.min")
+data_1_names <- tmp_coeffs@i
+data_1_numbers <- tmp_coeffs@x
+for (i in 2:length(data_1_numbers)){
+  y=as.numeric(data_1_names[i])
+  data_1_names[i] = rownames(data)[y]
+}
+selected_genes <- cbind(data_1_numbers)
+rownames(selected_genes) <- data_1_names
+colnames(selected_genes) <- c("Coefficient")
+print(selected_genes)
+write.csv(selected_genes,"~/3.0 Hasting Research/Melanoma Biomarker/Supplementary_table8_Scatolini_binomial.csv")
+```
+
+### Biplot
+```{r}
+biplot_data <- data[data_1_names[2:19],]
+biplot_data <- t(biplot_data)
+pca <- princomp(biplot_data)#
+
+colnames(outcome) <- c("Sample")
+biplot_data <- cbind(biplot_data,outcome)
+biplot_data <- as.data.frame(biplot_data)
+
+fviz_pca_biplot(pca, 
+                geom.ind = "point",
+                palette = c("indianred2","darkolivegreen","skyblue"),
+                col.ind=biplot_data[,19],
+                pch=19,
+                repel=TRUE,
+                title="Lasso Regression Genes, Scatolini")+scale_shape_manual(values=c(19,19,19))
+
+pdf("~/3.0 Hasting Research/Melanoma Biomarker/Scatolini/Scatolini Figures/Genes_Scatolini_binomial.pdf")
+fviz_pca_biplot(pca, 
+                geom.ind = "point",
+                palette = c("indianred2","darkolivegreen","skyblue"),
+                col.ind=biplot_data[,19],
+                pch=19,
+                repel=TRUE,
+                title="Lasso Regression Genes, Krueger")+scale_shape_manual(values=c(19,19,19))
+dev.off()
+```
+
+# Overlapping Genes Bastian vs Kreuger
+
+```{r}
+Top_MMvDN_subset <- Top_MMvDN[which(Top_MMvDN$ID %in% Top_MelvNev$genes),]
+Top_MelvNev_subset <- Top_MelvNev[which(Top_MelvNev$genes %in% Top_MMvDN$ID),]
+Top_MelvNev_subset <- Top_MelvNev_subset[match(Top_MMvDN_subset$ID,Top_MelvNev_subset$genes),]
+
+Top_Bastian_Krueger <- cbind(Top_MMvDN_subset, Top_MelvNev_subset)
+Top_Bastian_Krueger <- as.data.frame(Top_Bastian_Krueger)
+
+Top_Bastian_Krueger <- Top_Bastian_Krueger[which((Top_Bastian_Krueger[,2]>0 & Top_Bastian_Krueger[,9]>0) 
+                                                 | (Top_Bastian_Krueger[,2]<0 & Top_Bastian_Krueger[,9]<0)),]
+Top_Bastian_Krueger <- Top_Bastian_Krueger[which(Top_Bastian_Krueger[,6]<0.05),]
+print(Top_Bastian_Krueger$ID)
+
+Top_Bastian_Krueger_plot <- Top_Bastian_Krueger[,c(1,2,9)]
+#Top_Bastian_Krueger_plot <- t(Top_Bastian_Krueger_plot)
+names <- colnames(Top_Bastian_Krueger_plot)
+Top_Bastian_Krueger_plot <- as.data.frame(Top_Bastian_Krueger_plot)
+Kreuger <- matrix(c("Kreuger"), nrow=13)
+Bastian <- matrix(c("Bastian"), nrow=13)
+Top_Bastian_Krueger_plot_2 <- data.frame(ID <- c(Top_Bastian_Krueger_plot$ID, Top_Bastian_Krueger_plot$ID), len <- c(Top_Bastian_Krueger_plot$logFC,
+                                                      Top_Bastian_Krueger_plot$logFC.1), group <- c(Kreuger, Bastian))
+colnames(Top_Bastian_Krueger_plot_2) <- c("ID", "len", "group")
+Top_Bastian_Krueger_plot_2$len <- as.numeric(Top_Bastian_Krueger_plot_2$len)
+
+ggplot(data=Top_Bastian_Krueger_plot_2, aes(x=ID, y=len, fill=group))+ geom_bar(stat="identity", position = "dodge")+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+pdf("~/3.0 Hasting Research/Melanoma Biomarker/DEG_figures/overlap_Bastian_Krueger.pdf", width=12, height=12)
+ggplot(data=Top_Bastian_Krueger_plot_2, aes(x=ID, y=len, fill=group))+ geom_bar(stat="identity", position = "dodge")+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+dev.off()
+```
+
+# Overlapping Genes Kreuger vs Scatolini
+
+```{r}
+Top_MMvDN_subset <- Top_MMvDN[which(Top_MMvDN$ID %in% Top_VGMvDN_scat$ID),]
+Top_MMvDN_scat_subset <- Top_VGMvDN_scat[which(Top_VGMvDN_scat$ID %in% Top_MMvDN$ID),]
+Top_MMvDN_scat_subset <- Top_MMvDN_scat_subset[match(Top_MMvDN_subset$ID,Top_MMvDN_scat_subset$ID),]
+
+Top_Scatolini_Krueger <- cbind(Top_MMvDN_subset, Top_MMvDN_scat_subset)
+Top_Scatolini_Krueger <- as.data.frame(Top_Scatolini_Krueger)
+
+Top_Scatolini_Krueger <- Top_Scatolini_Krueger[which((Top_Scatolini_Krueger[,2]>0 & Top_Scatolini_Krueger[,9]>0) 
+                                                 | (Top_Scatolini_Krueger[,2]<0 & Top_Scatolini_Krueger[,9]<0)),]
+Top_Scatolini_Krueger <- Top_Scatolini_Krueger[which(Top_Scatolini_Krueger[,6]<0.05),]
+print(Top_Scatolini_Krueger$ID)
+
+Top_Scatolini_Krueger_plot <- Top_Scatolini_Krueger[,c(1,2,9)]
+names <- colnames(Top_Scatolini_Krueger_plot)
+Top_Scatolini_Krueger_plot <- as.data.frame(Top_Scatolini_Krueger_plot)
+Kreuger <- matrix(c("Kreuger"), nrow=10)
+Scatolini <- matrix(c("Scatolini"), nrow=10)
+Top_Scatolini_Krueger_plot_2 <- data.frame(ID <- c(Top_Scatolini_Krueger_plot$ID, Top_Scatolini_Krueger_plot$ID), len <- c(Top_Scatolini_Krueger_plot$logFC,Top_Scatolini_Krueger_plot$logFC.1), group <- c(Kreuger, Scatolini))
+colnames(Top_Scatolini_Krueger_plot_2) <- c("ID", "len", "group")
+Top_Scatolini_Krueger_plot_2$len <- as.numeric(Top_Scatolini_Krueger_plot_2$len)
+
+ggplot(data=Top_Scatolini_Krueger_plot_2, aes(x=ID, y=len, fill=group))+ geom_bar(stat="identity", position = "dodge")+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+pdf("~/3.0 Hasting Research/Melanoma Biomarker/DEG_figures/overlap_Scatolini_Krueger.pdf", width=12, height=12)
+ggplot(data=Top_Scatolini_Krueger_plot_2, aes(x=ID, y=len, fill=group))+ geom_bar(stat="identity", position = "dodge")+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+dev.off()
+```
+
+# Overlapping Bastian Scatolini
+
+```{r}
+Top_MelvNev_subset <- Top_MelvNev[which(Top_MelvNev$genes %in% Top_VGMvDN_scat$ID),]
+Top_MMvDN_scat_subset <- Top_VGMvDN_scat[which(Top_VGMvDN_scat$ID %in% Top_MelvNev$genes),]
+Top_MMvDN_scat_subset <- Top_MMvDN_scat_subset[match(Top_MelvNev_subset$genes,Top_MMvDN_scat_subset$ID),]
+
+Top_Scatolini_Bastian <- cbind(Top_MelvNev_subset, Top_MMvDN_scat_subset)
+Top_Scatolini_Bastian <- as.data.frame(Top_Scatolini_Bastian)
+
+Top_Scatolini_Bastian <- Top_Scatolini_Bastian[which((Top_Scatolini_Bastian[,2]>0 & Top_Scatolini_Bastian[,9]>0) 
+                                                 | (Top_Scatolini_Bastian[,2]<0 & Top_Scatolini_Bastian[,9]<0)),]
+print(Top_Scatolini_Bastian$ID)
+
+Top_Scatolini_Bastian_plot <- Top_Scatolini_Bastian[,c(1,2,9)]
+names <- colnames(Top_Scatolini_Bastian_plot)
+Top_Scatolini_Bastian_plot <- as.data.frame(Top_Scatolini_Bastian_plot)
+Bastian <- matrix(c("Bastian"), nrow=26)
+Scatolini <- matrix(c("Scatolini"), nrow=26)
+Top_Scatolini_Bastian_plot_2 <- data.frame(ID <- c(Top_Scatolini_Bastian_plot$genes, Top_Scatolini_Bastian_plot$genes), len <- c(Top_Scatolini_Bastian_plot$logFC,
+                                                      Top_Scatolini_Bastian_plot$logFC.1), group <- c(Bastian, Scatolini))
+colnames(Top_Scatolini_Bastian_plot_2) <- c("ID", "len", "group")
+Top_Scatolini_Bastian_plot_2$len <- as.numeric(Top_Scatolini_Bastian_plot_2$len)
+
+ggplot(data=Top_Scatolini_Bastian_plot_2, aes(x=ID, y=len, fill=group))+ geom_bar(stat="identity", position = "dodge")+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+pdf("~/3.0 Hasting Research/Melanoma Biomarker/DEG_figures/overlap_Bastian_Scatolini.pdf", width=12, height=12)
+ggplot(data=Top_Scatolini_Bastian_plot_2, aes(x=ID, y=len, fill=group), position="dodge")+ geom_bar(stat="identity", position = "dodge")+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+dev.off()
+```
